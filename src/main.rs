@@ -450,7 +450,12 @@ fn process_track(
 fn parse_album_meta(meta: &AlbumMetaResult, track_total: u16) -> ParsedAlbumMeta {
     ParsedAlbumMeta {
         album_title: meta.title.clone(),
-        album_artist: meta.participants[0].name.clone(),
+        album_artist: meta
+            .participants
+            .iter()
+            .map(|person| person.name.clone())
+            .collect::<Vec<_>>()
+            .join(", "),
         artist: String::new(),
         copyright: meta.copyright.clone(),
         cover_data: Vec::new(),
@@ -549,12 +554,11 @@ fn process_album(c: &mut IDAGIOClient, slug: &str, config: &Config) -> Result<()
     let mut parsed_meta = parse_album_meta(&meta, track_total);
     // meta.tracks.sort_by_key(|t| t.position);
 
-    println!("{}", parsed_meta.album_title);
+    println!("{} / {}", parsed_meta.album_artist, parsed_meta.album_title);
 
-    let san_artist_folder = sanitise(&parsed_meta.artist)?;
     let album_path = config
         .out_path
-        .join(san_artist_folder)
+        .join(&parsed_meta.album_artist)
         .join(&parsed_meta.album_title);
     fs::create_dir_all(&album_path)?;
 
