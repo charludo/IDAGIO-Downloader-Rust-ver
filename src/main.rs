@@ -3,29 +3,31 @@ mod structs;
 mod utils;
 
 use api::client::IDAGIOClient;
-use api::structs::{AlbumMetaResult, AudioTrack, Author, PersonalPlaylistMetaResult, PlaylistMetaResult, Track};
+use api::structs::{
+    AlbumMetaResult, AudioTrack, Author, PersonalPlaylistMetaResult, PlaylistMetaResult, Track,
+};
 use structs::{Args, Config, ParsedAlbumMeta};
 
 use std::error::Error;
 use std::fs::{self, File};
-use std::io::{self, BufReader, BufWriter, Read, Write, Error as IoError};
+use std::io::{self, BufReader, BufWriter, Error as IoError, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
 use clap::Parser;
 use ctr::cipher::{KeyIvInit, StreamCipher};
 use hex;
+use id3::frame::{Picture as Mp3Image, PictureType as Mp3ImageType};
+use id3::{Error as Id3Error, Tag as Mp3Tag, TagLike, Version};
 use indicatif::{ProgressBar, ProgressStyle};
-use metaflac::{Tag as FlacTag, Error as FlacError};
 use metaflac::block::PictureType::CoverFront as FlacCoverFront;
-use regex::{Regex, Error as RegexError};
+use metaflac::{Error as FlacError, Tag as FlacTag};
+use mp4ameta::{Data as Mp4Data, Error as Mp4Error, Fourcc, Tag as Mp4Tag};
+use regex::{Error as RegexError, Regex};
 use reqwest::blocking::Response as ReqwestResp;
 use reqwest::Error as ReqwestErr;
 use serde_json;
-use sha2::{Sha256, Digest};
-use id3::{Error as Id3Error, Tag as Mp3Tag, TagLike, Version};
-use id3::frame::{Picture as Mp3Image, PictureType as Mp3ImageType};
-use mp4ameta::{Tag as Mp4Tag, Data as Mp4Data, Fourcc, Error as Mp4Error};
+use sha2::{Digest, Sha256};
 
 type Aes128Ctr128BE = ctr::Ctr128BE<aes::Aes128>;
 
@@ -37,7 +39,7 @@ const REGEX_STRINGS: [&str; 5] = [
     r#"^https://app.idagio.com/playlists/([a-zA-Z\d-]+)$"#,
     r#"^https://app.idagio.com/profiles/([a-zA-Z\d-]+)/(?:about|albums)(?:\?([^#]*))?$"#,
     r#"^https://app.idagio.com/playlists/personal/([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"#,
- ];
+];
 
 const SAN_REGEX_STRING: &str = r#"[\/:*?"><|]"#;
 const SECRET: &str = "prod-media-c-YaiJaoni7iebeed5";
@@ -50,15 +52,49 @@ struct Quality {
 }
 
 static QUALITY_LIST: [(&str, Quality); 5] = [
-    ("aes-128-ctr/aac-160-", Quality {specs: "160 Kbps AAC", extension: ".m4a", format: &2}),
-    ("aes-128-ctr/aac-192-", Quality {specs: "192 Kbps AAC", extension: ".m4a", format: &2}),
-    ("aes-128-ctr/aac-320-", Quality {specs: "320 Kbps AAC", extension: ".m4a", format: &2}),
-    ("aes-128-ctr/flac-",    Quality {specs: "16-bit / 44.1 kHz FLAC", extension: ".flac", format: &3}),
-    ("aes-128-ctr/mp3-320-", Quality {specs: "320 Kbps MP3", extension: ".mp3", format: &1}),
+    (
+        "aes-128-ctr/aac-160-",
+        Quality {
+            specs: "160 Kbps AAC",
+            extension: ".m4a",
+            format: &2,
+        },
+    ),
+    (
+        "aes-128-ctr/aac-192-",
+        Quality {
+            specs: "192 Kbps AAC",
+            extension: ".m4a",
+            format: &2,
+        },
+    ),
+    (
+        "aes-128-ctr/aac-320-",
+        Quality {
+            specs: "320 Kbps AAC",
+            extension: ".m4a",
+            format: &2,
+        },
+    ),
+    (
+        "aes-128-ctr/flac-",
+        Quality {
+            specs: "16-bit / 44.1 kHz FLAC",
+            extension: ".flac",
+            format: &3,
+        },
+    ),
+    (
+        "aes-128-ctr/mp3-320-",
+        Quality {
+            specs: "320 Kbps MP3",
+            extension: ".mp3",
+            format: &1,
+        },
+    ),
 ];
 
-fn read_config(exe_path: &PathBuf) -> Result<Config, Box<dyn Error>> {
-    let config_path = exe_path.join("config.json");
+fn read_config(config_path: &PathBuf) -> Result<Config, Box<dyn Error>> {
     let f = File::open(config_path)?;
     let config: Config = serde_json::from_reader(f)?;
     Ok(config)
@@ -76,8 +112,17 @@ fn resolve_format(fmt: u8) -> Option<u8> {
 fn parse_config() -> Result<Config, Box<dyn Error>> {
     let exe_path = utils::get_exe_path()?;
 
-    let mut config = read_config(&exe_path)?;
     let args = Args::parse();
+
+    let mut config;
+    match args.config {
+        Some(c) => {
+            config = read_config(&c)?;
+        }
+        _ => {
+            config = read_config(&exe_path.join("config.json"))?;
+        }
+    }
     let proc_urls = utils::process_urls(&args.urls)?;
 
     if args.keep_covers {
@@ -97,8 +142,7 @@ fn parse_config() -> Result<Config, Box<dyn Error>> {
 
     config.out_path.push("IDAGIO downloads");
 
-    config.format = resolve_format(config.format)
-        .ok_or("format must be between 1 and 3")?;
+    config.format = resolve_format(config.format).ok_or("format must be between 1 and 3")?;
 
     if config.use_ffmpeg_env_var {
         config.ffmpeg_path = PathBuf::from("./ffmpeg");
@@ -179,13 +223,11 @@ fn parse_key_and_iv(key_and_iv: &str) -> Result<(Vec<u8>, Vec<u8>), Box<dyn Erro
 
 fn sanitise(filename: &str) -> Result<String, RegexError> {
     let re = Regex::new(SAN_REGEX_STRING)?;
-    Ok(re.replace_all(filename, "_").to_string())    
+    Ok(re.replace_all(filename, "_").to_string())
 }
 
 fn download(resp: &mut ReqwestResp, out_path: &PathBuf) -> Result<(), Box<dyn Error>> {
-    let total_size = resp
-        .content_length()
-        .ok_or("no content length header")?;
+    let total_size = resp.content_length().ok_or("no content length header")?;
 
     let f = File::create(out_path)?;
     let mut writer = BufWriter::new(f);
@@ -209,13 +251,22 @@ fn download(resp: &mut ReqwestResp, out_path: &PathBuf) -> Result<(), Box<dyn Er
     pb.finish();
     Ok(())
 }
-fn download_track(c: &mut IDAGIOClient, url: &str, incomp_path: &PathBuf, out_path: &PathBuf) -> Result<(), Box<dyn Error>> {
+fn download_track(
+    c: &mut IDAGIOClient,
+    url: &str,
+    incomp_path: &PathBuf,
+    out_path: &PathBuf,
+) -> Result<(), Box<dyn Error>> {
     let mut resp = c.get_file_resp(url, true)?;
-    let key_and_iv_str = resp.headers().get("x-x")
-        .map_or_else(
-            || Ok("".to_string()),
-            |value| value.to_str().map(|s| s.to_string()).map_err(|_| "failed to convert header value to string")
-        )?;
+    let key_and_iv_str = resp.headers().get("x-x").map_or_else(
+        || Ok("".to_string()),
+        |value| {
+            value
+                .to_str()
+                .map(|s| s.to_string())
+                .map_err(|_| "failed to convert header value to string")
+        },
+    )?;
 
     download(&mut resp, incomp_path)?;
 
@@ -261,13 +312,13 @@ fn query_quality(stream_url: &str) -> Option<Quality> {
 
 fn set_vorbis(tag: &mut metaflac::Tag, key: &str, value: &str) {
     if !value.is_empty() {
-        tag.set_vorbis(key, vec!(value));
+        tag.set_vorbis(key, vec![value]);
     }
 }
 
 fn set_vorbis_num(tag: &mut metaflac::Tag, key: &str, n: u16) {
     if n > 0 {
-        tag.set_vorbis(key, vec!(n.to_string()));
+        tag.set_vorbis(key, vec![n.to_string()]);
     }
 }
 
@@ -341,17 +392,26 @@ fn write_flac_tags(track_path: &PathBuf, meta: &ParsedAlbumMeta) -> Result<(), F
     Ok(())
 }
 
-fn write_tags(track_path: &PathBuf, fmt: &u8, meta: &ParsedAlbumMeta) -> Result<(), Box<dyn Error>> {
+fn write_tags(
+    track_path: &PathBuf,
+    fmt: &u8,
+    meta: &ParsedAlbumMeta,
+) -> Result<(), Box<dyn Error>> {
     match fmt {
         1 => write_mp3_tags(track_path, meta)?,
         2 => write_mp4_tags(track_path, meta)?,
         3 => write_flac_tags(track_path, meta)?,
-        _ => {},
+        _ => {}
     }
     Ok(())
 }
 
-fn process_track(c: &mut IDAGIOClient, album_path: &PathBuf, meta: &ParsedAlbumMeta, url: &str) -> Result<(), Box<dyn Error>> {
+fn process_track(
+    c: &mut IDAGIOClient,
+    album_path: &PathBuf,
+    meta: &ParsedAlbumMeta,
+    url: &str,
+) -> Result<(), Box<dyn Error>> {
     let quality = match query_quality(url) {
         Some(q) => q,
         None => {
@@ -360,7 +420,10 @@ fn process_track(c: &mut IDAGIOClient, album_path: &PathBuf, meta: &ParsedAlbumM
         }
     };
 
-    println!("Track {} of {}: {} - {}", meta.track_num, meta.track_total, meta.title, quality.specs);
+    println!(
+        "Track {} of {}: {} - {}",
+        meta.track_num, meta.track_total, meta.title, quality.specs
+    );
 
     let san_track_fname = format!("{:02}. {}", meta.track_num, sanitise(&meta.title)?);
     let mut track_path_no_ext = album_path.join(san_track_fname);
@@ -416,7 +479,10 @@ fn parse_plist_meta(meta: &PlaylistMetaResult, track_total: u16) -> ParsedAlbumM
     }
 }
 
-fn parse_personal_plist_meta(meta: &PersonalPlaylistMetaResult, track_total: u16) -> ParsedAlbumMeta {
+fn parse_personal_plist_meta(
+    meta: &PersonalPlaylistMetaResult,
+    track_total: u16,
+) -> ParsedAlbumMeta {
     ParsedAlbumMeta {
         album_title: meta.title.clone(),
         album_artist: meta.user_id.clone(),
@@ -432,7 +498,8 @@ fn parse_personal_plist_meta(meta: &PersonalPlaylistMetaResult, track_total: u16
 }
 
 fn parse_track_artists(authors: Vec<Author>) -> String {
-    authors.into_iter()
+    authors
+        .into_iter()
         .flat_map(|author| author.persons.into_iter().map(|person| person.name))
         .collect::<Vec<String>>()
         .join(", ")
@@ -446,7 +513,7 @@ fn parse_track_meta(meta: &mut ParsedAlbumMeta, track_meta: &Track, track_num: u
         title += &format!(" - {}", piece_title)
     }
 
-    meta.artist =  parse_track_artists(track_meta.piece.workpart.work.authors.clone());
+    meta.artist = parse_track_artists(track_meta.piece.workpart.work.authors.clone());
     meta.title = title;
     meta.track_num = track_num;
 }
@@ -465,7 +532,11 @@ fn write_cover(cover_data: &[u8], album_path: &PathBuf) -> Result<(), Box<dyn Er
     Ok(())
 }
 
-fn download_booklet(c: &mut IDAGIOClient, url: &str, album_path: &PathBuf) -> Result<(), Box<dyn Error>> {
+fn download_booklet(
+    c: &mut IDAGIOClient,
+    url: &str,
+    album_path: &PathBuf,
+) -> Result<(), Box<dyn Error>> {
     let booklet_path = album_path.join("booklet.pdf");
     let mut resp = c.get_file_resp(url, false)?;
     let mut f = File::create(booklet_path)?;
@@ -480,11 +551,14 @@ fn process_album(c: &mut IDAGIOClient, slug: &str, config: &Config) -> Result<()
     let mut parsed_meta = parse_album_meta(&meta, track_total);
     // meta.tracks.sort_by_key(|t| t.position);
 
-    let album_folder = format!("{} - {}", parsed_meta.album_artist, parsed_meta.album_title);
-    println!("{}", album_folder);
+    println!("{}", parsed_meta.album_title);
 
-    let san_album_folder = sanitise(&album_folder)?;
-    let album_path = config.out_path.join(san_album_folder);
+    let san_album_folder = sanitise(&parsed_meta.album_title)?;
+    let san_artist_folder = sanitise(&parsed_meta.album_artist)?;
+    let album_path = config
+        .out_path
+        .join(san_artist_folder)
+        .join(san_album_folder);
     fs::create_dir_all(&album_path)?;
 
     let stream_meta = c.get_stream_meta(meta.track_ids, config.format)?;
@@ -519,17 +593,22 @@ fn process_album(c: &mut IDAGIOClient, slug: &str, config: &Config) -> Result<()
     Ok(())
 }
 
-fn make_base_url(url: &str) -> Result<String, Box<dyn Error>>{
+fn make_base_url(url: &str) -> Result<String, Box<dyn Error>> {
     let idx = url.find("/sep/").ok_or("url separator not present")?;
     let base = format!("{}/parcel/", &url[..idx]);
     Ok(base)
 }
 
 fn get_aac_audio(audio: &[AudioTrack]) -> Option<&AudioTrack> {
-    audio.iter().find(|&d|d.codecs == "mp4a.40.2")
+    audio.iter().find(|&d| d.codecs == "mp4a.40.2")
 }
 
-fn mux_mp4(ffmpeg_path: &PathBuf, video_path: &PathBuf, audio_path: &PathBuf, out_path: &PathBuf) -> Result<(), Box<dyn Error>> {
+fn mux_mp4(
+    ffmpeg_path: &PathBuf,
+    video_path: &PathBuf,
+    audio_path: &PathBuf,
+    out_path: &PathBuf,
+) -> Result<(), Box<dyn Error>> {
     let output: Output = Command::new(ffmpeg_path)
         .arg("-i")
         .arg(video_path)
@@ -562,7 +641,13 @@ fn process_video(c: &mut IDAGIOClient, slug: &str, config: &Config) -> Result<()
     }
 
     let vimeo_meta = c.get_vimeo_meta(&meta.video.video_id)?;
-    let master_url = vimeo_meta.request.files.dash.cdns.akfire_interconnect_quic.avc_url;
+    let master_url = vimeo_meta
+        .request
+        .files
+        .dash
+        .cdns
+        .akfire_interconnect_quic
+        .avc_url;
     let base_url = make_base_url(&master_url)?;
     let mut master = c.get_video_master(&master_url)?;
 
@@ -588,11 +673,17 @@ fn process_video(c: &mut IDAGIOClient, slug: &str, config: &Config) -> Result<()
     let video_path = config.out_path.join("v.mp4");
     let audio_path = config.out_path.join("a.mp4");
 
-    println!("Video: ~{} Kbps | {} FPS | {}p ({}x{2})", video.avg_bitrate/1000, video.framerate, video.height, video.width);
+    println!(
+        "Video: ~{} Kbps | {} FPS | {}p ({}x{2})",
+        video.avg_bitrate / 1000,
+        video.framerate,
+        video.height,
+        video.width
+    );
     let mut video_resp = c.get_file_resp(&video_url, true)?;
     download(&mut video_resp, &video_path)?;
 
-    println!("Audio: AAC ~{} Kbps", audio.avg_bitrate/1000);
+    println!("Audio: AAC ~{} Kbps", audio.avg_bitrate / 1000);
     let mut audio_resp = c.get_file_resp(&audio_url, true)?;
     download(&mut audio_resp, &audio_path)?;
 
@@ -633,7 +724,11 @@ fn process_plist(c: &mut IDAGIOClient, slug: &str, config: &Config) -> Result<()
     Ok(())
 }
 
-fn process_personal_plist(c: &mut IDAGIOClient, id: &str, config: &Config) -> Result<(), Box<dyn Error>> {
+fn process_personal_plist(
+    c: &mut IDAGIOClient,
+    id: &str,
+    config: &Config,
+) -> Result<(), Box<dyn Error>> {
     let meta = c.get_personal_plists_meta(id)?;
 
     let track_total = meta.tracks.len() as u16;
@@ -662,7 +757,12 @@ fn process_personal_plist(c: &mut IDAGIOClient, id: &str, config: &Config) -> Re
     Ok(())
 }
 
-fn process_artist(c: &mut IDAGIOClient, slug: &str, params: Option<String>, config: &Config) -> Result<(), Box<dyn Error>> {
+fn process_artist(
+    c: &mut IDAGIOClient,
+    slug: &str,
+    params: Option<String>,
+    config: &Config,
+) -> Result<(), Box<dyn Error>> {
     let meta = c.get_artist_albums_meta(slug, params)?;
 
     let album_total = meta.len();
@@ -678,21 +778,21 @@ fn process_artist(c: &mut IDAGIOClient, slug: &str, params: Option<String>, conf
 }
 
 fn compile_regexes() -> Result<Vec<Regex>, regex::Error> {
-    REGEX_STRINGS.iter()
-        .map(|&s| Regex::new(s))
-        .collect()
+    REGEX_STRINGS.iter().map(|&s| Regex::new(s)).collect()
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let config = parse_config()
-        .expect("failed to parse args/config");
+    let config = parse_config().expect("failed to parse args/config");
     fs::create_dir_all(&config.out_path)?;
-    
+
     let mut c = IDAGIOClient::new()?;
     c.auth(&config.email, &config.password)
         .expect("failed to auth");
-    
-    println!("Signed in successfully - {}\n", c.user_info.plan_display_name);
+
+    println!(
+        "Signed in successfully - {}\n",
+        c.user_info.plan_display_name
+    );
 
     if !c.user_info.premium {
         println!("No active subscription; audio quality limited.");
@@ -726,3 +826,4 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+

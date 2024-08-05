@@ -5,20 +5,26 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "IDAGIO Downloader")]
 pub struct Args {
+    #[clap(short, long, help = "Path to config file")]
+    pub config: Option<PathBuf>,
 
-    #[clap(short='b', long, help="Download booklets when available.")]
+    #[clap(short = 'b', long, help = "Download booklets when available.")]
     pub download_booklets: bool,
 
-    #[clap(short, long, help="1 = AAC 160 / 192, 2 = MP3 320 / AAC 320, 3 = 16/44 FLAC.")]
+    #[clap(
+        short,
+        long,
+        help = "1 = AAC 160 / 192, 2 = MP3 320 / AAC 320, 3 = 16/44 FLAC."
+    )]
     pub format: Option<u8>,
 
-    #[clap(short, long, help="Output path.")]
+    #[clap(short, long, help = "Output path.")]
     pub out_path: Option<PathBuf>,
 
-    #[clap(short, long, help="Keep covers in album folder.")]
+    #[clap(short, long, help = "Keep covers in album folder.")]
     pub keep_covers: bool,
 
-    #[clap(short, long, help="Write covers to tracks.")]
+    #[clap(short, long, help = "Write covers to tracks.")]
     pub write_covers: bool,
 
     #[clap(short, long, num_args = 1.., required = true)]
@@ -53,3 +59,4 @@ pub struct ParsedAlbumMeta {
     pub upc: String,
     pub year: u16,
 }
+
