@@ -549,13 +549,9 @@ fn process_album(c: &mut IDAGIOClient, slug: &str, config: &Config) -> Result<()
     let mut parsed_meta = parse_album_meta(&meta, track_total);
     // meta.tracks.sort_by_key(|t| t.position);
 
-    let san_artist_folder = sanitise(&parsed_meta.album_artist)?;
     let san_album_folder = sanitise(&parsed_meta.album_title)?;
-    println!("{} / {}", &san_artist_folder, &san_album_folder);
-    let album_path = config
-        .out_path
-        .join(&san_artist_folder)
-        .join(&san_album_folder);
+    println!("{}", &san_album_folder);
+    let album_path = config.out_path.join(&san_album_folder);
     fs::create_dir_all(&album_path)?;
 
     let stream_meta = c.get_stream_meta(meta.track_ids, config.format)?;
