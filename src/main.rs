@@ -140,8 +140,6 @@ fn parse_config() -> Result<Config, Box<dyn Error>> {
     config.format = args.format.unwrap_or(config.format);
     config.out_path = args.out_path.unwrap_or(config.out_path);
 
-    config.out_path.push("IDAGIO downloads");
-
     config.format = resolve_format(config.format).ok_or("format must be between 1 and 3")?;
 
     if config.use_ffmpeg_env_var {
@@ -553,12 +551,11 @@ fn process_album(c: &mut IDAGIOClient, slug: &str, config: &Config) -> Result<()
 
     println!("{}", parsed_meta.album_title);
 
-    let san_album_folder = sanitise(&parsed_meta.album_title)?;
-    let san_artist_folder = sanitise(&parsed_meta.album_artist)?;
+    let san_artist_folder = sanitise(&parsed_meta.artist)?;
     let album_path = config
         .out_path
         .join(san_artist_folder)
-        .join(san_album_folder);
+        .join(&parsed_meta.album_title);
     fs::create_dir_all(&album_path)?;
 
     let stream_meta = c.get_stream_meta(meta.track_ids, config.format)?;
